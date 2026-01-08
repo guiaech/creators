@@ -1,49 +1,64 @@
-import streamlit as st
+import os
+import re
 import sqlite3
 from datetime import datetime, timezone
-import pandas as pd
-import re
-import os
 
-# ----------------------------
-# Config
-# ----------------------------
+import pandas as pd
+import streamlit as st
+
+# =========================
+# Config / Helpers
+# =========================
+
 DB_PATH = "rp_events.db"
 
-# Defina a senha por ENV var (recomendado) ou secrets no Streamlit Cloud.
-# Ex: ADMIN_PASSWORD="minhasenha"
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 
-def utc_now_str():
+def get_admin_password() -> str:
+    """Lê a senha do admin via Streamlit Secrets ou ENV."""
+    secret_pass = ""
+    try:
+        secret_pass = st.secrets.get("ADMIN_PASSWORD", "")
+    except Exception:
+        secret_pass = ""
+
+    return os.getenv("ADMIN_PASSWORD", "") or secret_pass or ""
+
+
+def utc_now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")  # melhor pra múltiplos acessos
+    conn.execute("PRAGMA journal_mode=WAL;")
     return conn
+
 
 def init_db():
     conn = get_conn()
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS confirmations (
-        event_key TEXT NOT NULL,
-        org_id TEXT NOT NULL,
-        org_name TEXT NOT NULL,
-        confirmed INTEGER NOT NULL DEFAULT 0,
-        confirmed_by TEXT,
-        confirmed_at TEXT,
-        PRIMARY KEY (event_key, org_id, org_name)
-    );
-    """)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS confirmations (
+            event_key TEXT NOT NULL,
+            org_id TEXT NOT NULL,
+            org_name TEXT NOT NULL,
+            confirmed INTEGER NOT NULL DEFAULT 0,
+            confirmed_by TEXT,
+            confirmed_at TEXT,
+            PRIMARY KEY (event_key, org_id, org_name)
+        );
+        """
+    )
     conn.commit()
     conn.close()
 
+
 def parse_orgs(text: str):
     """
-    Aceita linhas no formato:
-    08 | Caribe
-    08 Caribe
-    8 | Caribe  (vira 08)
+    Aceita:
+      08 | Caribe
+      08 Caribe
+      8 | Caribe   -> vira 08
     """
     orgs = []
     for raw in text.splitlines():
@@ -61,7 +76,6 @@ def parse_orgs(text: str):
         if not org_name:
             continue
 
-        # padroniza ID 1 dígito -> 0X, mas mantém "00" como está se vier assim
         if len(org_id_raw) == 1:
             org_id = org_id_raw.zfill(2)
         else:
@@ -69,7 +83,7 @@ def parse_orgs(text: str):
 
         orgs.append((org_id, org_name))
 
-    # remove duplicados mantendo ordem (por id + nome)
+    # remove duplicados mantendo ordem
     seen = set()
     uniq = []
     for oid, on in orgs:
@@ -81,83 +95,113 @@ def parse_orgs(text: str):
 
     return uniq
 
+
 def replace_event_list(event_key: str, orgs: list[tuple[str, str]]):
+    """Substitui toda a lista do evento e zera confirmações."""
     conn = get_conn()
     conn.execute("DELETE FROM confirmations WHERE event_key = ?", (event_key,))
-    conn.executemany("""
+    conn.executemany(
+        """
         INSERT INTO confirmations (event_key, org_id, org_name, confirmed)
         VALUES (?, ?, ?, 0)
-    """, [(event_key, oid, oname) for oid, oname in orgs])
+        """,
+        [(event_key, oid, oname) for oid, oname in orgs],
+    )
     conn.commit()
     conn.close()
 
+
 def load_event(event_key: str) -> pd.DataFrame:
     conn = get_conn()
-    df = pd.read_sql_query("""
+    df = pd.read_sql_query(
+        """
         SELECT org_id, org_name, confirmed, confirmed_by, confirmed_at
         FROM confirmations
         WHERE event_key = ?
         ORDER BY CAST(org_id AS INTEGER), org_name
-    """, conn, params=(event_key,))
+        """,
+        conn,
+        params=(event_key,),
+    )
     conn.close()
     if not df.empty:
         df["confirmed"] = df["confirmed"].astype(int)
     return df
 
+
 def set_confirmed(event_key: str, org_id: str, org_name: str, confirmed: bool, who: str):
     conn = get_conn()
     if confirmed:
-        conn.execute("""
+        conn.execute(
+            """
             UPDATE confirmations
             SET confirmed = 1,
                 confirmed_by = ?,
                 confirmed_at = ?
             WHERE event_key = ? AND org_id = ? AND org_name = ?
-        """, (who.strip() or "—", utc_now_str(), event_key, org_id, org_name))
+            """,
+            (who.strip() or "—", utc_now_str(), event_key, org_id, org_name),
+        )
     else:
-        conn.execute("""
+        conn.execute(
+            """
             UPDATE confirmations
             SET confirmed = 0,
                 confirmed_by = NULL,
                 confirmed_at = NULL
             WHERE event_key = ? AND org_id = ? AND org_name = ?
-        """, (event_key, org_id, org_name))
+            """,
+            (event_key, org_id, org_name),
+        )
     conn.commit()
     conn.close()
+
 
 def reset_event(event_key: str):
     conn = get_conn()
-    conn.execute("""
+    conn.execute(
+        """
         UPDATE confirmations
         SET confirmed = 0, confirmed_by = NULL, confirmed_at = NULL
         WHERE event_key = ?
-    """, (event_key,))
+        """,
+        (event_key,),
+    )
     conn.commit()
     conn.close()
 
-# ----------------------------
+
+# =========================
 # UI
-# ----------------------------
-st.set_page_config(page_title="Confirmar ORGs - SANTA CREATORS", layout="wide")
+# =========================
+
+st.set_page_config(page_title="Confirmar ORGs - RP", layout="wide")
 init_db()
 
 st.title("✅ Confirmar ORGs - SANTA CREATORS")
 
 col1, col2, col3 = st.columns([1.2, 1.2, 2.2])
+
 with col1:
-    event_day = st.selectbox("Dia do evento", ["Quinta", "Sexta", "Sábado"])
+    event_day = st.selectbox(
+        "Dia do evento",
+        ["Quinta", "Sexta", "Sábado"],
+        key="event_day_select",
+    )
+
 with col2:
-    event_date = st.date_input("Data")
+    event_date = st.date_input("Data", key="event_date_input")
+
 with col3:
-    user = st.text_input("Seu nome (@discord)", placeholder="Ex: @guilherme")
+    user = st.text_input("Seu nome (@discord)", placeholder="Ex: @guilherme", key="user_name_input")
 
 event_key = f"{event_day}-{event_date.isoformat()}"
 
 tab_confirmar, tab_config = st.tabs(["✅ Confirmar", "⚙️ Configurar lista (admin)"])
 
-# ----------------------------
-# Aba Confirmar (usuários)
-# ----------------------------
+# -------------------------
+# Tab: Confirmar
+# -------------------------
 with tab_confirmar:
     df = load_event(event_key)
 
@@ -171,12 +215,15 @@ with tab_confirmar:
     st.caption(f"{done}/{total} confirmadas")
 
     cA, cB, cC = st.columns([1, 1, 2])
+
     with cA:
-        show_only_pending = st.toggle("Mostrar só pendentes", value=True)
+        show_only_pending = st.toggle("Mostrar só pendentes", value=True, key=f"toggle_pending_{event_key}")
+
     with cB:
-        allow_unconfirm = st.toggle("Permitir desconfirmar", value=False)
+        allow_unconfirm = st.toggle("Permitir desconfirmar", value=False, key=f"toggle_unconfirm_{event_key}")
+
     with cC:
-        if st.button("🔄 Resetar confirmações deste evento", type="secondary"):
+        if st.button("🔄 Resetar confirmações deste evento", type="secondary", key=f"btn_reset_{event_key}"):
             reset_event(event_key)
             st.rerun()
 
@@ -188,17 +235,20 @@ with tab_confirmar:
     st.divider()
 
     for _, row in df_view.iterrows():
-        org_label = f"{row['org_id']} | {row['org_name']}"
+        org_id = str(row["org_id"])
+        org_name = str(row["org_name"])
+        checked = True if int(row["confirmed"]) == 1 else False
+
+        org_label = f"{org_id} | {org_name}"
         left, mid, right = st.columns([2.2, 1, 2.8])
 
         with left:
             st.write(org_label)
 
         with mid:
-            disabled = (row["confirmed"] == 1) and (not allow_unconfirm)
-            checked = True if row["confirmed"] == 1 else False
-            key = f"chk-{event_key}-{row['org_id']}-{row['org_name']}"
-            new_val = st.checkbox("Confirmado", value=checked, key=key, disabled=disabled)
+            disabled = checked and (not allow_unconfirm)
+            chk_key = f"chk_{event_key}_{org_id}_{org_name}"
+            new_val = st.checkbox("Confirmado", value=checked, disabled=disabled, key=chk_key)
 
         with right:
             who = row["confirmed_by"] if row["confirmed_by"] else "—"
@@ -208,47 +258,62 @@ with tab_confirmar:
         if new_val != checked:
             if new_val and not user.strip():
                 st.warning("Digite seu nome antes de confirmar.")
-                st.session_state[key] = checked
+                st.session_state[chk_key] = checked
             else:
-                set_confirmed(event_key, row["org_id"], row["org_name"], new_val, user)
+                set_confirmed(event_key, org_id, org_name, new_val, user)
             st.rerun()
 
-# ----------------------------
-# Aba Configurar (admin)
-# ----------------------------
+# -------------------------
+# Tab: Configurar (admin)
+# -------------------------
 with tab_config:
     st.subheader("Configurar lista do evento")
 
-    # se não tiver senha definida, deixa aberto (mas eu recomendo definir)
-    if ADMIN_PASSWORD:
-        admin_pass = st.text_input("Senha admin", type="password", placeholder="Senha do admin")
-        if admin_pass != ADMIN_PASSWORD:
-            st.info("Digite a senha admin para editar a lista.")
+    admin_password = get_admin_password()
+
+    if admin_password:
+        admin_pass = st.text_input(
+            "Senha admin",
+            type="password",
+            placeholder="Digite a senha",
+            key="admin_pass_input",
+        )
+
+        if not admin_pass:
+            st.info("Digite a senha para liberar a configuração da lista.")
+            st.stop()
+
+        if admin_pass != admin_password:
+            st.error("Senha incorreta.")
             st.stop()
     else:
-        st.warning("⚠️ ADMIN_PASSWORD não definido. Qualquer pessoa pode editar a lista (defina no cloud!).")
+        st.warning("⚠️ ADMIN_PASSWORD não definido. Qualquer pessoa pode editar a lista (defina em Secrets).")
 
-    st.write("Cole a lista (1 por linha). Exemplos aceitos: `08 | Caribe` ou `08 Caribe`")
+    st.write("Cole a lista (1 por linha). Exemplos: `08 | Caribe` ou `08 Caribe`")
 
     pasted = st.text_area(
         "Lista de organizações",
         height=260,
-        placeholder="08 | Caribe\n53 | Rússia\n57 | Japão\n..."
+        placeholder="08 | Caribe\n53 | Rússia\n57 | Japão\n...",
+        key=f"orgs_textarea_{event_key}",  # key único por evento
     )
 
     colA, colB = st.columns([1, 1.6])
 
     with colA:
-        if st.button("🔎 Validar"):
+        if st.button("🔎 Validar", key=f"btn_validate_{event_key}"):
             parsed = parse_orgs(pasted)
             if not parsed:
                 st.error("Não encontrei linhas válidas. Use o formato: 08 | Caribe")
             else:
                 st.success(f"OK! {len(parsed)} organizações detectadas.")
-                st.dataframe(pd.DataFrame(parsed, columns=["org_id", "org_name"]), use_container_width=True)
+                st.dataframe(
+                    pd.DataFrame(parsed, columns=["org_id", "org_name"]),
+                    use_container_width=True,
+                )
 
     with colB:
-        if st.button("💾 Salvar lista do evento (substituir)", type="primary"):
+        if st.button("💾 Salvar lista do evento (substituir)", type="primary", key=f"btn_save_{event_key}"):
             parsed = parse_orgs(pasted)
             if not parsed:
                 st.error("Lista vazia ou inválida.")
@@ -258,4 +323,4 @@ with tab_config:
                 st.rerun()
 
     st.divider()
-    st.caption("Dica: você pode montar a lista do dia copiando do Discord e colando aqui.")
+    st.caption("Dica: copie do Discord e cole aqui. Depois é só o time marcar as confirmações.")
