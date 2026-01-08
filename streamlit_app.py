@@ -2,7 +2,7 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timezone
-
+import time
 import pandas as pd
 import streamlit as st
 
@@ -146,10 +146,18 @@ event_key = f"{event_day}-{event_date.isoformat()}"
 tab_confirmar, tab_config = st.tabs(["✅ Confirmar", "⚙️ Configurar lista (admin)"])
 
 # =========================
-# Confirmar (NÃO pode st.stop aqui)
+# Confirmar (sem st.stop) + Auto-refresh pros outros verem sem F5
 # =========================
 with tab_confirmar:
     df = load_event(event_key)
+
+    # ---- Auto-refresh (polling leve) ----
+    # IMPORTANTE: garanta que você tem `import time` no topo do arquivo.
+    r1, r2 = st.columns([1, 2])
+    with r1:
+        auto_refresh = st.toggle("Auto-atualizar", value=True, key=f"autorefresh_{event_key}")
+    with r2:
+        refresh_sec = st.slider("Intervalo (seg)", 2, 30, 5, key=f"refreshsec_{event_key}")
 
     if df.empty:
         st.warning("Ainda não existe lista para este evento. Vá na aba ⚙️ para configurar.")
@@ -200,6 +208,12 @@ with tab_confirmar:
                 else:
                     set_confirmed(event_key, org_id, org_name, new_val, user)
                 st.rerun()
+
+    # ---- Trigger do auto-refresh (no final do tab) ----
+    if auto_refresh:
+        time.sleep(refresh_sec)
+        st.rerun()
+
 
 # =========================
 # Configurar lista (admin)
