@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import time
 import pandas as pd
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+
 
 DB_PATH = "rp_events.db"
 
@@ -153,11 +155,16 @@ with tab_confirmar:
 
     # ---- Auto-refresh (polling leve) ----
     # IMPORTANTE: garanta que você tem `import time` no topo do arquivo.
+# ---- Auto-refresh (não trava o app) ----
     r1, r2 = st.columns([1, 2])
     with r1:
         auto_refresh = st.toggle("Auto-atualizar", value=True, key=f"autorefresh_{event_key}")
     with r2:
         refresh_sec = st.slider("Intervalo (seg)", 2, 30, 5, key=f"refreshsec_{event_key}")
+
+    # dispara rerun automático somente se tiver lista e toggle ligado
+    if auto_refresh and not df.empty:
+        st_autorefresh(interval=refresh_sec * 1000, key=f"autorefresh_tick_{event_key}")
 
     if df.empty:
         st.warning("Ainda não existe lista para este evento. Vá na aba ⚙️ para configurar.")
